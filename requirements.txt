@@ -1,0 +1,4 @@
+h5py
+jax[cpu]
+jax[cuda12]
+matplotlib
