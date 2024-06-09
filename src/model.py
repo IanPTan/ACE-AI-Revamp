@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as np
-from jax import lax
+from jax import lax, nn
 
 @jax.jit
 def normalize(x):
@@ -85,10 +85,19 @@ def memory(x, last_x, last_mem, mix_w, rkv_w, out_w, raw_decay):
   decay = np.exp(-np.exp(raw_decay))
   tmp_k_kv = np.moveaxis(k_kv, 2, 0)
   tmp_mem = lax.scan(mem_scan, (last_mem, decay), tmp_k_kv)
+  new_mem = tmp_mem[-1]
   mem = np.moveaxis(tmp_mem, 0, 2)
 
   out = mem_out(mem, r, out_w)
-  return out
+  return out, x, new_mem
+
+@jax.jit
+def memory_block(x, state, params):
+  x = dense_norm(x=x, **params['dense_norm'])
+  dx, state['last_x'], state['last_mem'] = memory(x=x, **state, **params['memory'])
+  out = x + dx
+  x = nn.gelu(dense(x, **params['dense']))
+  return x
 
 if __name__ == '__main__':
   from time import time
