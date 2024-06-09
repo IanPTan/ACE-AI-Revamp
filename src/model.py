@@ -89,44 +89,54 @@ def parallel_memory(x, raw_last_x, last_mem, mix_w, rkv_w, out_w, raw_decay):
   out = mem_out_block(mem, r, out_w)
   return out, new_x, new_mem
 
+class DenseNorm(pt.nn.Module):
+  def __init__(self, in_len, out_len):
+    self.dense = pt.nn.linear(in_len, out_len)
+
+  def forward(self, x):
+    x = self.dense(x)
+    x = normalize(x)
+    return x
+
 class Memory(pt.nn.Module):
-  def __init__(self, in_len, mem_len=None, out_len=None, serial=False, last_x=None, last_mem=None, norm_w=None, mix_w=None, rkv_w=None, decay=None, out_w=None, dense_w=None):
+  def __init__(self, in_len, mem_len=None, out_len=None, serial=False, last_x=None, last_mem=None, mix_w=None, rkv_w=None, decay=None, out_w=None):
     super().__init__()
     
-    if mem_len == None:
-      mem_len = in_len
-    if out_len == None:
-      out_len = in_len
     self.in_len = in_len
-    self.mem_len = mem_len
-    self.out_len = out_len
+    self.mem_len = mem_len if mem_len else self.in_len
+    self.out_len = out_len if out_len else self.in_len
 
-    if norm_w == None:
-      norm_w = pt.nn.Parameter(pt.randn(in_len, in_len))
-    if mix_w == None:
-      mix_w = pt.nn.Parameter(pt.randn(3, in_len))
-    if rkv_w == None:
-      rkv_w = pt.nn.Parameter(pt.randn(3, mem_len, in_len))
-    if decay == None:
-      decay = pt.nn.Parameter(pt.randn(mem_len))
-    if out_w == None:
-      out_w = pt.nn.Parameter(pt.randn(in_len, mem_len))
-    if dense_w == None:
-      dense_w = pt.nn.Parameter(pt.randn(out_len, in_len))
-    self.norm_w = norm_w
-    self.mix_w = mix_w
-    self.rkv_w = rkv_w
-    self.decay_w = decay_w
-    self.out_w = out_w
-    self.dense_w = dense_w
+
+    self.mix_w = mix_w if mix_w else pt.nn.Parameter(pt.randn(3, self.in_len))
+    self.rkv_w = rkv_w if rkv_w else pt.nn.Parameter(pt.randn(3, self.mem_len, self.in_len))
+    self.decay = decay if decay else pt.nn.Parameter(pt.randn(self.mem_len))
+    self.out_w = out_w if out_w else pt.nn.Parameter(pt.randn(self.in_len, self.mem_len))
+
+    self.dense_norm = DenseNorm(in_len, in_len)
+    self.dense = pt.nn.linear(in_len, out_len)
+    self.gelu = pt.nn.GELU()
     
     self.memory = serial_memory if serial else memory
-    self.serial = serial
-    if last_x == None:
-      last_x = pt.zeros(1, in_len)
-    self.last_x = last_x
-    if last_mem == None:
-      last_mem = pt.zeros(2, 1, mem_len)
-    self.last_mem = last_mem
+    self.last_x = last_x if last_x else pt.zeros(1, self.in_len)
+    self.last_mem = last_mem if last_mem else pt.zeros(2, 1, self.mem_len)
   
   def forward(self, x):
+    x = self.dense_norm(x)
+    dx, self.last_x, self.last_mem = self.memory(x)
+    x = x + dx
+    x = dense(x)
+    x = self.gelu(x)
+    return x
+
+  def reset(self):
+    self.last_x = pt.zeros(1, self.in_len)
+    self.last_mem = pt.zeros(2, 1, self.mem_len)
+
+  def set_serial(self, serial):
+    self.memory = serial_memory if serial else memory
+
+  def get_state(self):
+    return {
+        'last_x': self.last_x,
+        'last_mem': self.last_mem,
+        }
