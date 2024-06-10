@@ -84,7 +84,7 @@ def parallel_memory(x, last_x, last_mem, mix_w, rkv_w, out_w, decay):
 
 class DenseNorm(pt.nn.Module):
   def __init__(self, in_len, out_len):
-    super().__init__()
+    super(DenseNorm, self).__init__()
     self.dense = pt.nn.Linear(in_len, out_len)
 
   def forward(self, x):
@@ -94,7 +94,7 @@ class DenseNorm(pt.nn.Module):
 
 class MemoryBlock(pt.nn.Module):
   def __init__(self, in_len, mem_len=None, out_len=None, serial=False, last_x=None, last_mem=None, mix_w=None, rkv_w=None, decay=None, out_w=None):
-    super().__init__()
+    super(MemoryBlock, self).__init__()
     
     self.in_len = in_len
     self.mem_len = mem_len if mem_len else self.in_len
@@ -111,20 +111,20 @@ class MemoryBlock(pt.nn.Module):
     self.gelu = pt.nn.GELU()
     
     self.memory = serial_memory if serial else parallel_memory
-    self.last_x = last_x if last_x else pt.zeros(1, self.in_len)
-    self.last_mem = last_mem if last_mem else pt.zeros(2, 1, self.mem_len)
+    self.register_buffer('last_x', last_x if last_x else pt.zeros(1, self.in_len))
+    self.register_buffer('last_mem', last_mem if last_mem else pt.zeros(2, 1, self.mem_len))
   
   def forward(self, x):
     x = self.dense_norm(x)
     dx, self.last_x, self.last_mem = self.memory(x, last_x=self.last_x, last_mem=self.last_mem, mix_w=self.mix_w, rkv_w=self.rkv_w, out_w=self.out_w, decay=self.decay)
     x = x + dx
-    x = self.dense(x)
     x = self.gelu(x)
+    x = self.dense(x)
     return x
 
   def reset(self):
-    self.last_x = pt.zeros(1, self.in_len)
-    self.last_mem = pt.zeros(2, 1, self.mem_len)
+    self.last_x = pt.zeros(1, self.in_len, device=self.last_x.device)
+    self.last_mem = pt.zeros(2, 1, self.mem_len, device=self.last_mem.device)
 
   def set_serial(self, serial):
     self.memory = serial_memory if serial else parallel_memory
@@ -136,9 +136,8 @@ class MemoryBlock(pt.nn.Module):
         }
 
 if __name__ == '__main__':
-  TORCH_LOGS="+dynamo"
-  TORCHDYNAMO_VERBOSE=1
   print('Running test...')
-  l = MemoryBlock(8, serial=1)
-  i = pt.randn(16, 8)
+  d = pt.device('cuda')
+  l = MemoryBlock(8, serial=0).to(d)
+  i = pt.randn(256, 16, 8, device=d)
   o = l(i)
