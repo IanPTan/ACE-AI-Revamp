@@ -13,7 +13,8 @@ def mix_weight(x, w):
   return out
 
 @pt.compile
-def mix(a, b, w):
+def mix(a, b, rw):
+  w = pt.exp(-pt.exp(rw))
   inv_w = 1 - w
   w_a = mix_weight(a, w)
   w_b = mix_weight(b, inv_w)
@@ -39,9 +40,9 @@ def rkv_block(x, last_x, mix_w, rkv_w):
   r = pt.exp(-pt.exp(r_x))
 
   kv = k * v
-  k_kv = pt.stack((k, kv))
+  kv_k = pt.stack((kv, k))
 
-  return k_kv, r
+  return kv_k, r
 
 @pt.compile
 def mem_out_block(mem, r, out_w):
@@ -51,20 +52,20 @@ def mem_out_block(mem, r, out_w):
 
 @pt.compile
 def serial_memory(x, last_x, last_mem, mix_w, rkv_w, out_w, decay):
-  k_kv, r = rkv_block(x, last_x, mix_w, rkv_w)
+  kv_k, r = rkv_block(x, last_x, mix_w, rkv_w)
 
   mem_decay = pt.exp(-pt.exp(decay))
-  mem = last_mem * mem_decay + k_kv
+  mem = last_mem * mem_decay + kv_k
 
   out = mem_out_block(mem, r, out_w)
   return out, x, mem
 
 @pt.jit.script
-def mem_scan(last_mem, decay, k_kv):
-  mem = pt.zeros_like(k_kv)
+def mem_scan(last_mem, decay, kv_k):
+  mem = pt.zeros_like(kv_k)
   t_len = mem.shape[2]
   for i in range(t_len):
-    last_mem = last_mem * decay + k_kv[:, :, i]
+    last_mem = last_mem * decay + kv_k[:, :, i]
     mem[:, :, i] = last_mem
   return mem, last_mem
 
@@ -74,10 +75,10 @@ def parallel_memory(x, last_x, last_mem, mix_w, rkv_w, out_w, decay):
   all_last_x[:, 0] = last_x
   all_last_x[:, 1:] = x[:, :-1]
   new_x = x[:, -1]
-  k_kv, r = rkv_block(x, all_last_x, mix_w, rkv_w)
+  kv_k, r = rkv_block(x, all_last_x, mix_w, rkv_w)
 
   mem_decay = pt.exp(-pt.exp(decay))
-  mem, new_mem = mem_scan(last_mem, mem_decay, k_kv)
+  mem, new_mem = mem_scan(last_mem, mem_decay, kv_k)
 
   out = mem_out_block(mem, r, out_w)
   return out, new_x, new_mem
@@ -93,7 +94,7 @@ class DenseNorm(pt.nn.Module):
     return x
 
 class MemoryBlock(pt.nn.Module):
-  def __init__(self, in_len, mem_len=None, out_len=None, serial=False, last_x=None, last_mem=None, mix_w=None, rkv_w=None, decay=None, out_w=None):
+  def __init__(self, in_len, mem_len=None, out_len=None, serial=False, last_x=None, last_mem=None, mix_w=None, rkv_w=None, decay=None, out_w=None, reset=True):
     super(MemoryBlock, self).__init__()
     
     self.in_len = in_len
@@ -110,11 +111,22 @@ class MemoryBlock(pt.nn.Module):
     self.dense = pt.nn.Linear(self.in_len, self.out_len)
     self.gelu = pt.nn.GELU()
     
+    self.forward = self.reset_forward if reset else self.persist_forward
     self.memory = serial_memory if serial else parallel_memory
     self.register_buffer('last_x', last_x if last_x else pt.zeros(1, self.in_len))
     self.register_buffer('last_mem', last_mem if last_mem else pt.zeros(2, 1, self.mem_len))
   
-  def forward(self, x):
+  def persist_forward(self, x):
+    x = self.dense_norm(x)
+    dx, self.last_x, self.last_mem = self.memory(x, last_x=self.last_x, last_mem=self.last_mem, mix_w=self.mix_w, rkv_w=self.rkv_w, out_w=self.out_w, decay=self.decay)
+    x = x + dx
+    x = self.gelu(x)
+    x = self.dense(x)
+    return x
+
+  def reset_forward(self, x):
+    self.last_x = pt.zeros(1, self.in_len, device=self.last_x.device)
+    self.last_mem = pt.zeros(2, 1, self.mem_len, device=self.last_mem.device)
     x = self.dense_norm(x)
     dx, self.last_x, self.last_mem = self.memory(x, last_x=self.last_x, last_mem=self.last_mem, mix_w=self.mix_w, rkv_w=self.rkv_w, out_w=self.out_w, decay=self.decay)
     x = x + dx
@@ -125,6 +137,9 @@ class MemoryBlock(pt.nn.Module):
   def reset(self):
     self.last_x = pt.zeros(1, self.in_len, device=self.last_x.device)
     self.last_mem = pt.zeros(2, 1, self.mem_len, device=self.last_mem.device)
+
+  def set_reset(self, reset):
+    self.forward = self.reset_forward if reset else self.persist_forward
 
   def set_serial(self, serial):
     self.memory = serial_memory if serial else parallel_memory
@@ -138,6 +153,6 @@ class MemoryBlock(pt.nn.Module):
 if __name__ == '__main__':
   print('Running test...')
   d = pt.device('cuda')
-  l = MemoryBlock(8, serial=0).to(d)
-  i = pt.randn(256, 16, 8, device=d)
+  l = MemoryBlock(4, serial=0).to(d)
+  i = pt.randn(128, 8, 4, device=d)
   o = l(i)

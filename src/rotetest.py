@@ -11,6 +11,7 @@ device = pt.device('cuda' if pt.cuda.is_available() else 'cpu')
 
 def test(ds, m, ind, full=False):
 
+  model.eval()
   model.reset()
   i, t = ds[ind]
   i, t = i.to(device), t.to(device)
@@ -27,7 +28,7 @@ def test(ds, m, ind, full=False):
 
 class Model(pt.nn.Module):
 
-  def __init__(self, in_len, out_len, mem_len, lay_len, serial=False):
+  def __init__(self, in_len, out_len, mem_len, lay_len, serial=False, reset=True):
     super(Model, self).__init__()
     self.serial = serial
     self.in_len = in_len
@@ -48,6 +49,11 @@ class Model(pt.nn.Module):
       if isinstance(layer, MemoryBlock):
         layer.reset()
 
+  def set_reset(self, reset):
+    for layer in self.model:
+      if isinstance(layer, MemoryBlock):
+        layer.set_reset(reset)
+
   def set_serial(self, serial):
     for layer in self.model:
       if isinstance(layer, MemoryBlock):
@@ -55,13 +61,13 @@ class Model(pt.nn.Module):
 
 epochs = 500
 opt_num = 3
-seq_len = 5
+seq_len = 10
 test_ratio = 0.1
-batch_size = 219
+batch_size = 2 ** 15
 hidden_size = 32
 lay_len = 2
 backup_interval = 100
-trials = 10
+trials = 5
 
 dataset = RoteDataset(opt_num, seq_len)
 
@@ -69,7 +75,7 @@ test_size = int(test_ratio * len(dataset))
 train_size = len(dataset) - test_size
 
 train_batch_len = train_size // batch_size + bool(train_size % batch_size)
-test_batch_len = test_size // test_size + bool(test_size % batch_size)
+test_batch_len = test_size // batch_size + bool(test_size % batch_size)
 
 train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
@@ -101,10 +107,11 @@ for trial in range(trials):
     model.train()
     for i, (inputs, targets) in enumerate(train_loader):
       inputs, targets = inputs.to(device), targets.to(device)
-      exit()
+      inputs_shape = inputs.shape
+      padded_inputs = pt.zeros(batch_size, *inputs_shape[1:], device=device)
+      padded_inputs[:inputs_shape[0]] = inputs
       optimizer.zero_grad()
-      model.reset()
-      outputs = model(inputs)[:, seq_len:].permute(0, 2, 1)
+      outputs = model(padded_inputs)[:, seq_len:].permute(0, 2, 1)[:inputs_shape[0]]
       loss = criterion(outputs, targets)
       losses[i] = loss
       loss.backward()
@@ -114,7 +121,6 @@ for trial in range(trials):
     with pt.no_grad():
       for i, (inputs, targets) in enumerate(test_loader):
         inputs, targets = inputs.to(device), targets.to(device)
-        model.reset()
         outputs = model(inputs)[:, seq_len:].permute(0, 2, 1)
         loss = criterion(outputs, targets)
         test_losses[i] = loss
@@ -123,8 +129,8 @@ for trial in range(trials):
     all_test_losses[epoch] = pt.mean(test_losses)
 
     if (epoch + 1) % backup_interval == 0:
-      print(f'Epoch {epoch + 1}/{epochs}, time: {time() - start:.3f}, Loss: {pt.mean(losses)}, Val Loss: {pt.mean(test_losses)}')
-      pt.save(model.state_dict(), 'backup.ckpt')
+      print(f'Epoch {epoch + 1}/{epochs}, time: {time() - start:.3f}, Loss: {pt.mean(losses):.5f}, Val Loss: {pt.mean(test_losses):.5f}')
+      pt.save(model.state_dict(), f'backups/backup.{trial + 1}.{epoch + 1}.ckpt')
 
   models.append(model.state_dict())
   times.append(time() - start)
@@ -132,7 +138,7 @@ for trial in range(trials):
   all_trial_test_losses.append(all_test_losses.detach())
   print(f'Finished! ({times[-1]:.3f}s)')
 
-pt.save(model.state_dict(), 'backup.ckpt')
+pt.save(model.state_dict(), 'backups/backup.ckpt')
 times = np.array(times)
 print(f'Finished all trials in {times.sum():.3f}s with average time {times.mean():.3f}s.')
 for all_losses in all_trial_losses:
